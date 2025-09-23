@@ -1,0 +1,85 @@
+DETAILED REFERENCE: dji_drone_control library
+
+1. control_barrier_function.py
+    - ControlBarrierFunction (class): Abstract base for all control barrier functions (CBF). Used to keep drones safe and within limits.
+       - _calc_cbf(positions): Calculates the CBF value (how safe the current state is).
+       - _calc_grad(positions): Calculates the gradient (how CBF changes with position).
+       - cbf: Property to get the current CBF value.
+       - grad: Property to get the current gradient value.
+    - AutoDiffControlBarrierFunction (class): CBF with gradients calculated automatically using JAX.
+       - _calc_grad(positions): Uses automatic differentiation to get the gradient.
+    - ThreadedControlBarrierFunction (class): CBF that runs calculations in a separate thread for real-time control.
+       - start_thread(): Starts the calculation thread.
+       - stop_thread(): Stops the calculation thread.
+       - wait_until_node_ready(): Waits for ROS node to be ready.
+       - get_time(): Gets current time.
+       - create_rate(frequency): Creates a rate object for timing.
+    - CbfBasedCoverage (class): Uses CBFs for coverage control, inherits threading and safety features.
+       - _calc_cbf(): Calculates coverage CBF.
+       - _calc_grad(): Calculates gradient for coverage.
+       - cbf: Property for current coverage CBF value.
+       - grad: Property for current coverage gradient.
+    - QpSolver (class): Abstract class for quadratic programming solvers (used for optimization).
+       - add_cbf(cbf): Adds a CBF to the solver.
+       - add_cbfs(cbfs): Adds multiple CBFs.
+       - solve(u_nom): Solves the optimization problem.
+    - CoverageControlSolver (class): Solver for coverage control using CBFs and quadratic programming.
+       - add_cbf(cbf): Adds a CBF.
+       - stop_threads(): Stops all threads.
+       - solve(u_nom): Solves for optimal drone movement.
+
+2. controller.py
+    - Space (class): Represents the area/grid for drone operation. Can be 2D, 3D, or 5D.
+       - set_x_range, set_y_range, set_z_range, set_h_range, set_v_range: Set the min/max for each dimension.
+       - set_x_density, set_y_density, set_z_density, set_h_density, set_v_density: Set grid resolution for each dimension.
+       - set_2D_polygon_range(polygon, generate): Set a polygon boundary for the area.
+       - generate(): Generates the grid and boundaries.
+       - grids(): Returns the grid arrays for each dimension.
+       - get_index(...): Gets the index of a point in the grid.
+
+3. distributed_controller.py
+    - DistributedController (class): Manages multiple drones in a distributed way.
+       - get_positions(): Gets positions of all drones.
+       - sync_array(...): Synchronizes arrays (like density) between drones.
+       - request_array_sync, response_array_sync: Handle array sync requests/responses.
+
+4. joy.py
+    - JoyController (class): Allows drone control via joystick/gamepad.
+       - joy_callback(msg): Handles joystick input.
+       - on_press_btn_*: Methods for button presses (home, up, down, left, right, etc.).
+       - on_axis_trg(...): Handles joystick axis triggers.
+
+5. message_converter.py
+    - array_to_pointcloud2_rgb(data, **kwargs): Converts a data array (like coverage/density) into a colored PointCloud2 message for visualization in RViz.
+
+Other classes and functions exist in these files, but the above are the main ones referenced in angle_aware_coverage_control.py.
+
+
+References to dji_drone_control library (used in angle_aware_coverage_control.py):
+
+1. ControlBarrierFunction (from control_barrier_function.py)
+   - An abstract base class for "control barrier functions" (CBF), which are mathematical tools to keep drones safe and within limits.
+   - Provides methods to calculate the CBF value and its gradient (how it changes with position).
+
+2. CbfBasedCoverage (from control_barrier_function.py)
+   - A class that uses CBFs to help drones cover an area efficiently while respecting safety and field limits.
+
+3. CoverageControlSolver (from control_barrier_function.py)
+   - Solves optimization problems to find the best way for drones to move, using CBFs and other constraints.
+
+4. Space (from controller.py)
+   - Represents the area or space where drones operate.
+   - Can be 2D, 3D, or even 5D (including angles and altitude).
+   - Provides methods to set up the grid and boundaries for coverage.
+
+5. DistributedController (from distributed_controller.py)
+   - Manages multiple drones working together in a distributed way (not just one central controller).
+   - Handles communication and coordination between drones.
+
+6. JoyController (from joy.py)
+   - Allows control of drones using a joystick/gamepad.
+   - Handles input from the user for manual control.
+
+7. array_to_pointcloud2_rgb (from message_converter.py)
+   - Converts data arrays (like coverage or density maps) into colored point cloud messages for visualization.
+   - Used to show results in tools like RViz (robot visualization).
