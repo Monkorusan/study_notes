@@ -119,3 +119,67 @@ Now the missing pieces are clear:
 - $\partial B(p_i, R) \cap S_i$ is its moving boundary surface;
 - $dS$ appears from the surface integral in Reynolds' theorem;
 - $\delta p_i$ (or $v_i$) disappears when converting the directional derivative to the gradient vector.
+
+---
+
+# Bonus: About the $(b+R^2)$ Coefficient
+
+Let's unpack why $b$ becomes $b+R^2$ in the rewritten form of the objective function.
+
+## 1️⃣ Original objective in the second paper
+
+$$
+J(p,t) = -\sum_{i=1}^{n} \int_{S_i} \|q - p_i\|^2 \, \phi(q,t) \, dq + b \int_{Q \setminus \bigcup_i S_i} \phi(q,t) \, dq, \quad (b \leq -R^2)
+$$
+
+Here:
+
+- $S_i = B(p_i, R) \cap V_i$: the visible (or sensed) region of agent $i$,
+- $Q$: the mission domain,
+- $\phi(q,t)$: density (importance) function,
+- $b$: penalty constant for uncovered areas.
+
+## 2️⃣ Rewriting step and the appearance of $(b+R^2)$
+
+When the authors re-express the objective to unify terms, they often use the fact that
+
+$$
+Q = \bigcup_i S_i \cup \left(Q \setminus \bigcup_i S_i\right),
+$$
+
+so the second integral can be rewritten as an integral over $Q$ minus the sum over $S_i$.
+
+After algebraic manipulation:
+
+$$
+J(p,t) = b \int_Q \phi(q,t) \, dq - \sum_i \int_{S_i} \left(\|q - p_i\|^2 + b\right) \phi(q,t) \, dq.
+$$
+
+Now, if $b \leq -R^2$, one can define
+
+$$
+b' = b + R^2,
+$$
+
+so that
+
+$$
+\|q - p_i\|^2 + b = \left(\|q - p_i\|^2 - R^2\right) + (b + R^2) = \left(\|q - p_i\|^2 - R^2\right) + b'.
+$$
+
+That substitution isolates the term $(\|q - p_i\|^2 - R^2)$, which is zero at the boundary of the sensing disk (where $\|q - p_i\| = R$).
+
+This is conceptually convenient — it makes the coverage potential reference to the sensing limit rather than absolute distance.
+
+## 3️⃣ Physical meaning
+
+- $b$: represents how undesirable an unsensed (uncovered) point is.
+- $R^2$: represents the maximum sensing cost — the squared radius of sensing region.
+
+So $b + R^2$ acts as an effective penalty offset, ensuring continuity of the objective at the boundary of each sensor's coverage disk.
+
+In other words, by adding $R^2$, the cost function is normalized so that the integrand inside $S_i$ transitions smoothly to zero at the edge of the sensing region, avoiding discontinuities when regions expand or shrink.
+
+## ✅ Summary
+
+They replace $b$ with $b + R^2$ not arbitrarily, but to shift the reference so that the potential inside each sensor's domain is zero at the sensing boundary ($\|q - p_i\| = R$). This keeps the objective physically meaningful and differentiable when defining gradient-based coverage controllers.
