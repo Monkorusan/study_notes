@@ -1066,3 +1066,468 @@ The multi-field controller automatically works with existing CBFs:
 4. Later: Add scheduler interface (replace service with scheduler topic)
 
 This approach keeps everything modular and scalable! 🚀
+
+---
+
+# Implementation Progress & Key Findings
+
+**Date:** November 5, 2025
+
+## ✅ Steps 1-3 Completed
+
+### Step 1: Mode Attribute Added to `Driver` ✅
+Located in `/home/pc/ros2_ws/src/dji_drone_robot/dji_drone_control/dji_drone_control/driver.py`
+
+```python
+# mode: for switching.
+self.mode = "Patrol"
+self.mode_pub = self.create_publisher(String, 'mode', qos_profile)
+self.create_timer(1.0, self.publish_mode)
+
+def publish_mode(self):
+    msg = String()
+    msg.data = self.mode
+    self.mode_pub.publish(msg)
+
+def set_mode(self, new_mode: str):
+    valid_modes: list[str] = ["Patrol", "Transfer", "Charging"]  # Note: Fixed typo from "Trasnsfer"
+    if new_mode in valid_modes:
+        old_mode = self.mode
+        self.mode = new_mode
+        self.get_logger().info(f"🔄 Mode: {old_mode} → {new_mode}")
+    else:
+        self.get_logger().error(f"❌ Invalid mode: {new_mode}")
+```
+
+### Step 2: Multi-field Configuration Created ✅
+Located in `/home/pc/ros2_ws/src/dji_drone_robot/dji_drone_demos/config/mf_aacc.yaml`
+
+Initial attempt had YAML syntax issues with nested lists.
+
+### Step 3: Multi-field Controller Mixin Created ✅
+Located in `/home/pc/ros2_ws/src/dji_drone_robot/dji_drone_control/dji_drone_control/multi_field_controller.py`
+
+Contains `MultiFieldControllerMixin` class with field switching capabilities.
+
+### Step 4: Concrete Implementation Created ✅
+The `MultiFieldAngleAwareCoverageController` was correctly placed in:
+`/home/pc/ros2_ws/src/dji_drone_robot/dji_drone_demos/dji_drone_demos/multi_field_aacc.py`
+
+**Architecture Decision:** Concrete implementations belong in `dji_drone_demos` (not `dji_drone_control`) because they are specific applications, while mixins stay in `dji_drone_control` as reusable components.
+
+---
+
+## 🔍 Key Discovery: How the Codebase Handles Phi/Density Grids
+
+### The Problem Encountered:
+When launching `mf_aacc.launch.py`, encountered this error:
+```
+Error: Sequences cannot be key at line 17
+```
+
+This was caused by trying to pass nested lists (field boundaries) as ROS2 parameters:
+```yaml
+multi_field:
+  boundaries:
+    - [-4.0, -2.0, -2.0, 2.0]  # ❌ ROS2 doesn't support this format
+    - [0.0, 2.0, -2.0, 2.0]
+    - [2.0, 4.0, -2.0, 2.0]
+```
+
+### The Investigation:
+Asked the question: **"How does this codebase deal with phi grid?"**
+
+Since RViz visualizes phi grids (2D arrays of floats 0-1) as colored point clouds, there must be a way to store and pass 2D arrays.
+
+### The Discovery: Three-Part Solution
+
+#### 1. **Storage Format** 
+Phi/density grids are stored as **2D numpy arrays**:
+
+```python
+# From angle_aware_coverage_control.py
+self.density_func = np.ndarray  # Shape: (440, 440) for example
+```
+
+Values range from 0.0 (visited) to 1.0 (unvisited).
+
+#### 2. **Visualization Pipeline**
+Found in `angle_aware_coverage_control.py` lines 476-483:
+
+```python
+def pub_pointcloud(self):
+    if self.solver.coverage.ready:
+        density = np.array(self.solver.coverage.density_func)/self.max_density
+        voronoi = np.array(self.solver.coverage.voronoi_diagrams[:, :, 0])
+        if density.shape != self.space.shape:
+            return
+        index = int(self.get_namespace()[len(self.get_namespace())-1])
+        msg = array_to_pointcloud2_rgb(density, space=self.space, voronoi_diagram=voronoi, index=index, method='color')
+        self.pointcloud2_pub.publish(msg)
+```
+
+**Key insight:** 
+- 2D numpy array → `array_to_pointcloud2_rgb()` → `PointCloud2` message → RViz
+- The converter is in `dji_drone_control/message_converter.py`
+
+#### 3. **Parameter Loading Solution**
+Found in `mpcs_central.py` lines 38-39:
+
+```python
+# Parse field boundaries using YAML approach
+field_boundaries_yaml = cfg.get("field_boundaries", 
+    "[[-4.0, -2.0, -2.0, 2.0], [0.0, 2.0, -2.0, 2.0], [2.0, 4.0, -2.0, 2.0]]")
+field_boundaries = yaml.safe_load(field_boundaries_yaml)
+```
+
+**THE SOLUTION:** Store nested lists as **YAML strings** in parameters, then parse with `yaml.safe_load()`!
+
+---
+
+## ✅ The Fixed Approach
+
+### Fixed `mf_aacc.yaml`:
+```yaml
+/**:
+  angle_aware_coverage_control:
+    ros__parameters:
+      # Standard AACC parameters
+      use_joy: false
+      control_period: 0.1
+      coverage_period: 0.1
+      pointcloud_period: 0.1
+      
+      # Multi-field parameters (stored as YAML string!)
+      field_boundaries: "[[-4.0, -2.0, -2.0, 2.0], [0.0, 2.0, -2.0, 2.0], [2.0, 4.0, -2.0, 2.0]]"
+      
+      multi_field:
+        density: 0.01
+        charging_station: [-5.0, -4.5, -0.5, 0.5]
+        inside_margin: 0.1
+        transfer_gain: 1.0
+      
+      # Battery charging
+      battery_charging:
+        station_position: [-4.75, 0.0]
+        charging_radius: 0.3
+        charging_speed: 0.00024
+        discharging_speed: 0.00037
+        min_battery: 0.2
+        max_battery: 1.0
+        init_battery: 0.99
+        k: 1.0
+```
+
+### Fixed `MultiFieldControllerMixin.__init__()`:
+```python
+import yaml
+
+def __init__(self):
+    # Create field manager
+    self.field_manager = FieldManager(f"{self.get_name()}_field_manager")
+    
+    # Load field boundaries from YAML string parameter
+    field_boundaries_yaml = self.get_parameter_value('field_boundaries')
+    field_boundaries = yaml.safe_load(field_boundaries_yaml)  # Parse YAML string to list
+    
+    field_density = self.get_parameter_value('multi_field.density')
+    
+    # Initialize fields
+    self.field_manager.initialize_from_param(
+        boundaries=field_boundaries,
+        density=field_density,
+        dim='xy'
+    )
+    
+    # ... rest of initialization
+```
+
+---
+
+## 🎓 Lessons Learned
+
+### 1. **Data Type Consistency**
+The codebase uses the same approach for all grid-like data:
+- Phi/density grids: 2D numpy arrays
+- Field boundaries: Lists of lists (loaded via YAML strings)
+- Voronoi diagrams: 3D numpy arrays (x, y, agent_index)
+
+### 2. **ROS2 Parameter Limitations**
+ROS2 parameters don't natively support:
+- ❌ Nested lists/sequences as keys
+- ❌ Multi-dimensional arrays
+- ✅ **Solution:** Store as YAML string, parse in Python
+
+### 3. **Architecture Pattern**
+```
+dji_drone_control/          ← Reusable components (mixins, utilities)
+├── multi_field_controller.py    ← Mixin (generic)
+└── multi_field.py               ← FieldManager utility
+
+dji_drone_demos/            ← Specific applications
+└── multi_field_aacc.py     ← Concrete controller (AACC-specific)
+```
+
+### 4. **Visualization Pattern**
+```
+NumPy Array (2D) 
+    ↓
+array_to_pointcloud2_rgb()
+    ↓
+PointCloud2 Message
+    ↓
+RViz (colored point cloud)
+```
+
+This same pattern can be used for:
+- Coverage density φ
+- Field boundaries (as colored regions)
+- Voronoi partitions
+- Any 2D scalar field
+
+---
+
+## 🚀 Why This Matters for Multi-Field AACC
+
+By discovering how the codebase handles 2D arrays, we can now:
+
+1. ✅ Store multiple field boundaries properly
+2. ✅ Maintain separate phi grids per field
+3. ✅ Visualize multiple fields in RViz simultaneously
+4. ✅ Use the existing `PointCloud2` pipeline for field visualization
+5. ✅ Keep the same data structure as single-field AACC
+
+**The codebase already has everything we need** - we just needed to understand the YAML string trick! 🎉
+
+---
+
+## 📍 Where is the Phi Grid Stored?
+
+**Quick Answer:** The phi grid (2D array) is **NOT centrally stored** - each controller creates and manages its own density/phi array.
+
+### For AACC (Angle-Aware Coverage Control):
+
+**Location:** `dji_drone_demos/angle_aware_coverage_control.py`
+
+The phi/density array is created in the `AngleAwareCoverage` class:
+
+```python
+# Line ~215 in angle_aware_coverage_control.py
+def __init__(self, init_density, ...):
+    if isinstance(init_density, np.ndarray):
+        self.init_density = jnp.array(init_density)
+    elif init_density == None:
+        self.init_density = jnp.ones(space.shape)  # ← Creates array of ones!
+    else:
+        self.init_density = init_density
+    
+    self.density_func = self.init_density  # ← This is the phi grid
+```
+
+Then the controller initializes it:
+```python
+# Line ~380
+init_density = get_density(source_space, space, altitude, "angle_aware")
+self.angle_aware_coverage = AngleAwareCoverage(
+    init_density=init_density,  # ← Passed here
+    ...
+)
+```
+
+### For MPCS (Multi-field):
+
+**Location:** `dji_drone_demos/mpcs_central.py`
+
+Each field has its own phi array:
+
+```python
+# Line ~77
+self.phi: List[np.ndarray] = []
+for space in self.spaces:
+    # Start with uniform density = 1
+    self.phi.append(np.ones_like(space.x))  # ← Creates array of ones per field!
+```
+
+---
+
+### 🔑 Key Point: No Global Phi Storage
+
+There's **no global phi storage**. Each demo controller:
+
+1. **Creates** its own `Space` object (defines grid dimensions)
+2. **Initializes** phi as `np.ones(space.shape)` or loads from file
+3. **Updates** phi locally in its own memory
+4. **Publishes** to RViz via `PointCloud2` for visualization
+
+The phi grid lives **inside the controller instance**, not in a shared location!
+
+This means for multi-field AACC, we need to:
+- Create a `List[np.ndarray]` to store one phi grid per field (like MPCS does)
+- Update the appropriate phi grid based on which field the drone is currently in
+- Publish only the current field's phi grid for visualization
+
+---
+
+## Field Boundaries in AACC: From YAML Parameter to RViz2 Visualization
+Here's the complete flow of field boundary management in the AACC system:
+### 1. **Parameter Definition (YAML Configuration)**
+The field boundaries start as parameters in `aacc.yaml`:
+```yaml
+field_range: [-2.2, 2.2, -2.2, 2.2]  # [x_min, x_max, y_min, y_max]
+field_limitation:
+    field_range: [-2.2, 2.2, -2.2, 2.2]
+```
+### 2. **Parameter Loading and Initial Processing**
+In the `AngleAwareCoverageController.__init__()` method:
+```python
+# Load field range from parameters
+range = self.get_parameter_value('field_range')
+density = self.get_parameter_value('field_density')
+# Create 2D workspace space
+space = Space('xy')
+space.set_x_range(range[0], range[1])  # [-2.2, 2.2]
+space.set_y_range(range[2], range[3])  # [-2.2, 2.2] 
+space.set_x_density(density[0])        # 0.01m resolution
+space.set_y_density(density[1])        # 0.01m resolution
+space.generate()
+```
+### 3. **Field Limitation CBF Creation**
+The field boundaries are used to create a Control Barrier Function (CBF) for keeping drones within bounds:
+```python
+# Convert field_range list to polygon vertices
+field_range = self.get_parameter_value('field_limitation.field_range')
+field = [[field_range[0], field_range[2]], [field_range[0], field_range[3]],
+         [field_range[1], field_range[3]], [field_range[1], field_range[2]]]
+# Create ConvexPolygonFieldLimitation CBF
+self.field_limitation = ConvexPolygonFieldLimitation(
+    field=field,
+    slack_variable=0.1,
+    get_positions=self.get_positions)
+```
+### 4. **Dynamic Field Updates via ROS Topic**
+The system can receive dynamic field boundaries through ROS messages:
+```python
+# Subscribe to polygon updates
+field_topic = '/field_range'
+self.polygon_sub = self.create_subscription(PolygonStamped, self.field_topic, self.polygon_callback, 10)
+def polygon_callback(self, msg: PolygonStamped):
+    """Receive polygon boundary updates from ROS topic"""
+    points = msg.polygon.points
+    field_buffer = np.zeros((0, 2))
+    for i in range(len(points)):
+    field_buffer = np.append(field_buffer, [[points[i].x, points[i].y]], axis=0)
+    self.field_buffer = field_buffer
+```
+### 5. **Field Boundary Processing in Control Loop**
+In the `send_command()` method, when new polygon data is received:
+```python
+if self.field_buffer is not None:
+    self.field = self.field_buffer
+    self.field_buffer = None
+    if self.field.shape[0] >= 3:  # Valid polygon needs at least 3 vertices
+    # Update coverage space with new polygon
+    centroid = np.mean(self.field, axis=0)
+    ratio = 0.5
+    small_vertices = [(1-ratio)*centroid+ratio*vertex for vertex in self.field]
+        
+    # Update source space (for 5D->2D compression)
+    self.source_space.set_2D_polygon_range(small_vertices, True)
+        
+    # Update target space (2D coverage area)
+    self.space.set_2D_polygon_range(self.field, True)
+        
+    # Regenerate density function with new boundaries
+    self.angle_aware_coverage.init_density = get_density(
+            self.source_space, self.space, 
+            self.get_parameter_value('angle_aware_coverage.altitude'), 
+            "angle_aware") * self.space.in_polygon
+        
+    # Update field limitation CBF
+    self.field_limitation.set_field(self.field)
+```
+### 6. **Space Class Polygon Processing**
+The `Space.set_2D_polygon_range()` method processes polygon boundaries:
+```python
+def set_2D_polygon_range(self, polygon: tuple | list | np.ndarray, generate: bool = False):
+    """Set polygon boundary for the space"""
+    assert np.array(polygon).shape[0] >= 3, "The polygon should have at least 3 points."
+    assert np.array(polygon).shape[1] == 2, "The polygon should be 2D."
+    
+    self.polygon = np.array(polygon)
+    center = self.polygon.mean(axis=0)
+    
+    # Sort vertices counter-clockwise
+    self.polygon = self.polygon[np.argsort(np.arctan2(
+    self.polygon[:, 1]-center[1], 
+    self.polygon[:, 0]-center[0]))]
+    
+    # Set bounding box
+    self.set_x_range(np.min(self.polygon[:, 0]), np.max(self.polygon[:, 0]))
+    self.set_y_range(np.min(self.polygon[:, 1]), np.max(self.polygon[:, 1]))
+    
+    if generate:
+    self.generate()
+```
+### 7. **Polygon Masking in Space Generation**
+When the space is generated, polygon boundaries create a mask:
+```python
+def generate(self):
+    """Generate the discrete space grid"""
+    self._calc_linspace()  # Create x,y coordinate arrays
+    self._calc_grid()      # Create meshgrid
+    
+    self.in_polygon = np.ones(self.shape, dtype=bool)
+    if self.polygon is not None:
+    self.in_polygon = self.in_polygon & self._in_polygon()
+    
+def _in_polygon(self) -> np.ndarray:
+    """Check which grid points are inside the polygon using cross products"""
+    in_polygon = np.ones(self.shape, dtype=bool)
+    for i in range(self.polygon.shape[0]):
+    a = self.polygon[i]
+    b = self.polygon[(i+1) % self.polygon.shape[0]]
+    # Cross product test for each edge
+    in_polygon = in_polygon & ((b[0]-a[0])*(self.y-b[1])-(b[1]-a[1])*(self.x-b[0]) > 0)
+    return in_polygon
+```
+### 8. **Density Function Visualization**
+The field boundaries affect the published density function:
+```python
+def pub_pointcloud(self):
+    """Publish density function as colored point cloud"""
+    if self.solver.coverage.ready:
+    # Get density function (already masked by polygon boundaries)
+    density = np.array(self.solver.coverage.density_func)/self.max_density
+    voronoi = np.array(self.solver.coverage.voronoi_diagrams[:, :, 0])
+        
+    # Convert to PointCloud2 with RGB colors
+    msg = array_to_pointcloud2_rgb(density, space=self.space, 
+                                     voronoi_diagram=voronoi, index=index, method='color')
+    self.pointcloud2_pub.publish(msg)
+```
+### 9. **RViz2 Configuration and Visualization**
+The launch file configures RViz2 to display both the density field and polygon boundaries:
+```python
+# Launch file: aacc.launch.py
+rviz_config=use_dynamic_config(drones, 
+                              point_cloud2_rgb="density",      # Density visualization
+                              polygon="/field_range")         # Field boundary polygon
+```
+### **Complete Data Flow Summary**
+
+1. **YAML** → `field_range: [-2.2, 2.2, -2.2, 2.2]`
+2. **Parameter Loading** → Converted to Space object bounds
+3. **Space Generation** → Creates discrete grid with polygon mask
+4. **CBF Creation** → Field limitation using ConvexPolygonFieldLimitation
+5. **Dynamic Updates** → `/field_range` topic allows runtime polygon changes
+6. **Density Calculation** → Applied only within polygon boundaries (`* self.space.in_polygon`)
+7. **PointCloud2 Publishing** → `/density` topic with RGB-colored density values
+8. **RViz2 Visualization** → Displays colored density field constrained by boundaries
+
+The field boundaries serve multiple purposes:
+- **Safety constraint** via CBF to keep drones within bounds
+- **Coverage constraint** to limit density calculation to valid areas  
+- **Visualization boundary** shown in RViz2 as polygon overlay
+- **Dynamic reconfiguration** allowing runtime field shape changes
+
+This creates a complete system where field boundaries defined in YAML parameters constrain both the drone behavior and the visual coverage representation in RViz2.
